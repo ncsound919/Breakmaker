@@ -13,7 +13,7 @@ const createEmptyTrack = () => Array(64).fill(0);
 const createEmptyStringTrack = () => Array(64).fill('');
 const createEmptyArrayTrack = () => Array(64).fill([]);
 
-const DEFAULT_PATTERN: any = {
+const DEFAULT_PATTERN: BreakPattern['pattern'] = {
   kick: createEmptyTrack().map((_, i) => (i % 16 === 0 || i % 16 === 6 || i % 16 === 9) ? 1 : 0),
   snare: createEmptyTrack().map((_, i) => (i % 16 === 4 || i % 16 === 12) ? 1 : 0),
   hihat: createEmptyTrack().map((_, i) => (i % 2 === 0) ? 1 : 0),
@@ -100,7 +100,7 @@ export default function App() {
     let playTime = time + (Math.random() * 0.024 - 0.012) * loosenessFactor;
 
     if (stepNumber % 2 !== 0) {
-      const swingAmount = (swing - 50) / 100; 
+      const swingAmount = (swing - 50) / 200; 
       const stepDuration = (60 / tempo) / 4;
       playTime += swingAmount * stepDuration;
     }
@@ -118,7 +118,7 @@ export default function App() {
     if (p.snare[stepNumber] > 0) engineRef.current.playSnare(playTime, humanizeVelocity(p.snare[stepNumber]));
     if (p.hihat[stepNumber] > 0) engineRef.current.playHihat(playTime, humanizeVelocity(p.hihat[stepNumber]), false);
     if (p.openHat[stepNumber] > 0) engineRef.current.playHihat(playTime, humanizeVelocity(p.openHat[stepNumber]), true);
-    if (p.ghostSnare[stepNumber] > 0) engineRef.current.playSnare(playTime, humanizeVelocity(p.ghostSnare[stepNumber]) * 0.5);
+    if (p.ghostSnare[stepNumber] > 0) engineRef.current.playSnare(playTime, humanizeVelocity(p.ghostSnare[stepNumber]));
     
     if (p.bass && p.bass[stepNumber] > 0 && p.bassNotes[stepNumber]) {
        engineRef.current.playBass(noteToFreq(p.bassNotes[stepNumber]), playTime, humanizeVelocity(p.bass[stepNumber]));
@@ -139,7 +139,6 @@ export default function App() {
 
   const scheduler = useCallback(() => {
     if (!engineRef.current) return;
-    const lookahead = 0.1; 
     const scheduleAheadTime = 0.1; 
     const totalSteps = params.bars * 16;
     
@@ -151,18 +150,22 @@ export default function App() {
       currentStepRef.current = (currentStepRef.current + 1) % totalSteps;
     }
     
-    timerIDRef.current = window.setTimeout(scheduler, lookahead * 1000);
+    timerIDRef.current = window.setTimeout(scheduler, 25);
   }, [tempo, scheduleNote, params.bars]);
 
-  const getEngine = () => {
-    if (!engineRef.current) {
-      engineRef.current = new BreakmakerEngine();
-      engineRef.current.setDirt(dirt);
-      engineRef.current.setHPF(hpf);
-      engineRef.current.setLPF(lpf);
-      engineRef.current.setKitProfile(params.kit);
-    }
-    return engineRef.current;
+  const [engineReady, setEngineReady] = useState(false);
+
+  useEffect(() => {
+    engineRef.current = new BreakmakerEngine();
+    setEngineReady(true);
+    return () => {
+      engineRef.current?.ctx.close();
+      engineRef.current = null;
+    };
+  }, []);
+
+  const ensureEngine = () => {
+    return engineRef.current!;
   };
 
   const exportPattern = () => {
@@ -179,7 +182,7 @@ export default function App() {
   const handleFileUpload = async (instrument: string, event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const engine = getEngine();
+    const engine = ensureEngine();
     if (engine.ctx.state === 'suspended') {
         engine.ctx.resume();
     }
@@ -194,7 +197,7 @@ export default function App() {
   };
 
   const togglePlay = () => {
-    const engine = getEngine();
+    const engine = ensureEngine();
 
     if (isPlaying) {
       setIsPlaying(false);
@@ -339,9 +342,14 @@ export default function App() {
 
                     if (newBars > oldBars) {
                       setPattern(prev => {
-                        const next = { ...prev };
-                        ['kick', 'snare', 'hihat', 'openHat', 'ghostSnare'].forEach(inst => {
-                           const track = next[inst as keyof typeof next] as number[];
+                        const next: any = { ...prev };
+                        const instsNumber = ['kick', 'snare', 'hihat', 'openHat', 'ghostSnare', 'bass', 'synth', 'sampler', 'samplerChops'];
+                        const instsString = ['bassNotes'];
+                        const instsArray = ['synthNotes'];
+                        
+                        instsNumber.forEach(inst => {
+                           next[inst] = [...next[inst]];
+                           const track = next[inst];
                            const sourceBar = track.slice(0, 16);
                            for (let b = oldBars; b < newBars; b++) {
                                for (let i = 0; i < 16; i++) {
@@ -349,7 +357,29 @@ export default function App() {
                                }
                            }
                         });
-                        return next;
+                        
+                        instsString.forEach(inst => {
+                           next[inst] = [...next[inst]];
+                           const track = next[inst];
+                           const sourceBar = track.slice(0, 16);
+                           for (let b = oldBars; b < newBars; b++) {
+                               for (let i = 0; i < 16; i++) {
+                                   track[b * 16 + i] = sourceBar[i] || '';
+                               }
+                           }
+                        });
+                        
+                        instsArray.forEach(inst => {
+                           next[inst] = [...next[inst]];
+                           const track = next[inst];
+                           const sourceBar = track.slice(0, 16);
+                           for (let b = oldBars; b < newBars; b++) {
+                               for (let i = 0; i < 16; i++) {
+                                   track[b * 16 + i] = sourceBar[i] || [];
+                               }
+                           }
+                        });
+                        return next as BreakPattern['pattern'];
                       });
                     }
                   }}
@@ -492,13 +522,13 @@ export default function App() {
             </div>
           </div>
 
-          <SamplerUI engine={getEngine()} />
+          <SamplerUI engine={engineRef.current} />
         </div>
 
         {/* Right Panel: Audio Tweaks */}
         <div className="lg:col-span-3 space-y-4">
 
-          <Mixer engine={getEngine()} />
+          <Mixer engine={engineRef.current} />
           
           {/* Groove Profile */}
           <div className="bg-[#1a1a1a] rounded-xl border border-zinc-800 p-5">

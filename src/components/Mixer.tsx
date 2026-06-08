@@ -43,7 +43,7 @@ export function Mixer({ engine }: MixerProps) {
                                 type="range" 
                                 min="0" max="1.5" step="0.01" 
                                 value={volumes[id as keyof typeof volumes]}
-                                onChange={(e) => handleVolume(id as keyof typeof volumes, parseFloat(e.target.value))}
+                                onChange={(e) => handleVolume(id as 'drums' | 'bass' | 'synth' | 'sampler', parseFloat(e.target.value))}
                                 className="absolute h-24 w-1 -rotate-90 appearance-none bg-transparent cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-zinc-200"
                                 style={{
                                     transform: "rotate(-90deg)",

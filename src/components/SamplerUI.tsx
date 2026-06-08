@@ -12,6 +12,7 @@ export function SamplerUI({ engine }: SamplerUIProps) {
   const [hasBuffer, setHasBuffer] = useState(false);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!engine) return;
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -33,7 +34,7 @@ export function SamplerUI({ engine }: SamplerUIProps) {
 
   const reChop = (t: number) => {
       setThreshold(t);
-      if (engine.userLoopBuffer) {
+      if (engine && engine.userLoopBuffer) {
           const newSlices = getSlices(engine.userLoopBuffer, t);
           engine.loadUserLoop(engine.userLoopBuffer, newSlices);
           setSlices(newSlices);
