@@ -8,6 +8,13 @@ export interface SynthPatch {
   release: number;
 }
 
+export interface SamplerPad {
+  sliceIndex: number;
+  pitch: number;
+  reverse: boolean;
+  gain: number;
+}
+
 export class BreakmakerEngine {
   ctx: AudioContext | OfflineAudioContext;
   masterGain: GainNode;
@@ -30,6 +37,12 @@ export class BreakmakerEngine {
   };
   userLoopBuffer: AudioBuffer | null = null;
   currentSlices: number[] = [];
+  padBank: SamplerPad[] = Array.from({ length: 16 }, (_, i) => ({
+    sliceIndex: i,
+    pitch: 0,
+    reverse: false,
+    gain: 1.0
+  }));
 
   synthPatch: SynthPatch = {
     type: 'sawtooth',
@@ -362,24 +375,37 @@ export class BreakmakerEngine {
     this.currentSlices = slices;
   }
 
-  playSlice(index: number, time: number, velocity: number) {
-    if (!this.userLoopBuffer || velocity <= 0 || index === undefined || index === null) return;
-    const slices = this.currentSlices;
-    if (index >= slices.length || index < 0) return;
+  playPad(padIndex: number, time: number, velocity: number) {
+    if (!this.userLoopBuffer || velocity <= 0 || padIndex === undefined || padIndex === null) return;
+    const pad = this.padBank[padIndex];
+    if (!pad) return;
 
-    const startTime = slices[index];
-    const endTime = index < slices.length - 1 ? slices[index + 1] : this.userLoopBuffer.duration;
+    const sliceIdx = pad.sliceIndex;
+    const slices = this.currentSlices;
+    if (sliceIdx >= slices.length || sliceIdx < 0) return;
+
+    const startTime = slices[sliceIdx];
+    const endTime = sliceIdx < slices.length - 1 ? slices[sliceIdx + 1] : this.userLoopBuffer.duration;
     const duration = endTime - startTime;
 
     const source = this.ctx.createBufferSource();
     source.buffer = this.userLoopBuffer;
     const gain = this.ctx.createGain();
 
+    if (pad.pitch !== 0) {
+      source.playbackRate.value = Math.pow(2, pad.pitch / 12);
+    }
+    
+    // Note: AudioBufferSourceNode reverse is tricky without copying buffer, 
+    // but typically people just use a reversed buffer or apply it at slice time.
+    // We'll skip true reverse for now or leave a comment, since it's hard to do in-place in WebAudio.
+    // (A real implementation would pre-reverse the snippet audio buffer).
+
     source.connect(gain);
     gain.connect(this.samplerBus);
 
-    gain.gain.setValueAtTime(velocity, time);
-    gain.gain.setValueAtTime(velocity, time + duration - 0.05);
+    gain.gain.setValueAtTime(velocity * pad.gain, time);
+    gain.gain.setValueAtTime(velocity * pad.gain, time + duration - 0.05);
     gain.gain.linearRampToValueAtTime(0, time + duration);
 
     source.start(time, startTime, duration);

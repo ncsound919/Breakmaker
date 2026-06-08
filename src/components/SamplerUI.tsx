@@ -101,6 +101,68 @@ export function SamplerUI({ engine }: SamplerUIProps) {
                 <span className="text-lg text-amber-500 font-mono">{slices.length}</span>
             </div>
         </div>
+
+        {engine?.padBank && (
+          <div className="mt-8 pt-6 border-t border-zinc-800/50">
+            <h3 className="text-[10px] font-mono text-zinc-500 uppercase mb-3 text-center">16-Pad Instrument Assignment</h3>
+            <div className="grid grid-cols-4 gap-2">
+              {engine.padBank.map((pad: any, i: number) => (
+                 <div key={i} className="bg-zinc-950 border border-zinc-800 rounded p-2 flex flex-col items-center hover:border-amber-500/50 transition-colors group">
+                    <div className="flex justify-between w-full mb-2">
+                      <span className="text-[9px] text-zinc-500 font-mono bg-zinc-900 px-1 rounded block">PAD {i}</span>
+                      <button 
+                        onClick={() => engine.playPad(i, engine.ctx.currentTime, 1.0)}
+                        className="w-4 h-4 bg-amber-500/10 hover:bg-amber-500 hover:text-zinc-900 text-amber-500 rounded flex items-center justify-center transition-colors"
+                      >
+                         <svg className="w-2.5 h-2.5 fill-current ml-0.5" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                      </button>
+                    </div>
+                    
+                    <div className="w-full space-y-1.5">
+                       <div className="flex items-center justify-between">
+                         <span className="text-[8px] text-zinc-500 font-mono">SLICE</span>
+                         <input 
+                            type="number" 
+                            min="0"
+                            value={pad.sliceIndex}
+                            onChange={e => {
+                               pad.sliceIndex = parseInt(e.target.value) || 0;
+                               setSlices([...slices]); 
+                            }}
+                            className="w-10 bg-zinc-900 text-right text-xs font-bold text-amber-500 border border-zinc-700 focus:border-amber-500 outline-none rounded px-1"
+                         />
+                       </div>
+                       <div className="flex items-center justify-between">
+                         <span className="text-[8px] text-zinc-500 font-mono">PITCH</span>
+                         <input 
+                            type="number"
+                            value={pad.pitch}
+                            onChange={e => {
+                                pad.pitch = parseInt(e.target.value) || 0;
+                                setSlices([...slices]); 
+                            }}
+                            className="w-10 bg-zinc-900 text-right text-[10px] text-zinc-300 border border-zinc-700 focus:border-amber-500 outline-none rounded px-1"
+                         />
+                       </div>
+                       <div className="flex items-center justify-between">
+                         <span className="text-[8px] text-zinc-500 font-mono">GAIN</span>
+                         <input 
+                            type="number"
+                            step="0.1"
+                            value={pad.gain}
+                            onChange={e => {
+                                pad.gain = parseFloat(e.target.value) || 0;
+                                setSlices([...slices]); 
+                            }}
+                            className="w-10 bg-zinc-900 text-right text-[10px] text-zinc-300 border border-zinc-700 focus:border-amber-500 outline-none rounded px-1"
+                         />
+                       </div>
+                    </div>
+                 </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

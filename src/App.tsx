@@ -74,6 +74,7 @@ export default function App() {
   const [previousPattern, setPreviousPattern] = useState<BreakPattern['pattern'] | null>(null);
   const [lockedTracks, setLockedTracks] = useState<Set<string>>(new Set());
   const [selectedTrack, setSelectedTrack] = useState<string | null>(null);
+  const [editStep, setEditStep] = useState<{ instrument: string, step: number, x: number, y: number } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   const engineRef = useRef<BreakmakerEngine | null>(null);
@@ -135,7 +136,7 @@ export default function App() {
        engineRef.current.playSynth(freqs, playTime, p.synth[stepNumber], 'String Pad');
     }
     if (p.sampler && p.sampler[stepNumber] > 0 && p.samplerChops) {
-       engineRef.current.playSlice(p.samplerChops[stepNumber], playTime, p.sampler[stepNumber]);
+       engineRef.current.playPad(p.samplerChops[stepNumber], playTime, p.sampler[stepNumber]);
     }
 
     const isCurrentlyPlaying = timerIDRef.current !== null;
@@ -179,8 +180,21 @@ export default function App() {
     return engineRef.current!;
   };
 
-  const exportPattern = () => {
-    const projectData = { name: breakName, tempo, swing, looseness, dirt, hpf, lpf, pattern, params };
+  const exportProject = () => {
+    const projectData = { 
+      name: breakName, 
+      tempo, 
+      swing, 
+      looseness, 
+      dirt, 
+      hpf, lpf, 
+      pattern, 
+      params,
+      synthPatch: engineRef.current?.synthPatch,
+      bassPatch: engineRef.current?.bassPatch,
+      padBank: engineRef.current?.padBank,
+      lockedTracks: Array.from(lockedTracks)
+    };
     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(projectData, null, 2));
     const a = document.createElement('a');
     a.href = dataStr;
@@ -188,6 +202,39 @@ export default function App() {
     document.body.appendChild(a);
     a.click();
     a.remove();
+  };
+
+  const importProject = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = JSON.parse(event.target?.result as string);
+        if (data.name) setBreakName(data.name);
+        if (data.tempo) setTempo(data.tempo);
+        if (data.swing) setSwing(data.swing);
+        if (data.looseness) setLooseness(data.looseness);
+        if (data.dirt) setDirt(data.dirt);
+        if (data.hpf) setHpf(data.hpf);
+        if (data.lpf) setLpf(data.lpf);
+        if (data.pattern) setPattern(data.pattern);
+        if (data.params) setParams(data.params);
+        if (data.lockedTracks) setLockedTracks(new Set(data.lockedTracks));
+        if (engineRef.current) {
+           if (data.synthPatch) engineRef.current.synthPatch = data.synthPatch;
+           if (data.bassPatch) engineRef.current.bassPatch = data.bassPatch;
+           if (data.padBank) engineRef.current.padBank = data.padBank;
+        }
+        setToast("Project loaded successfully!");
+        setTimeout(() => setToast(null), 3000);
+      } catch (err) {
+        setToast("Failed to load project.");
+        setTimeout(() => setToast(null), 3000);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // Reset file input
   };
 
   const exportAudioWav = async () => {
@@ -203,9 +250,16 @@ export default function App() {
         offlineEngine.setLPF(lpf);
         offlineEngine.setKitProfile(params.kit);
         
+        const seededRandom = (seed: number) => {
+            let x = Math.sin(seed * 9999.99) * 10000;
+            return x - Math.floor(x);
+        };
+
         const scheduleNoteOffline = (stepNumber: number, time: number) => {
             const loosenessFactor = looseness / 100;
-            let playTime = time + (Math.random() * 0.024 - 0.012) * loosenessFactor;
+            const r1 = seededRandom(stepNumber + 1);
+            
+            let playTime = time + (r1 * 0.024 - 0.012) * loosenessFactor;
             if (stepNumber % 2 !== 0) {
               const swingAmount = (swing - 50) / 200; 
               const stepDuration = (60 / tempo) / 4;
@@ -213,20 +267,21 @@ export default function App() {
             }
 
             const p = pattern;
-            const humanizeVelocity = (vel: number) => {
+            const humanizeVelocity = (vel: number, instIdx: number) => {
                 if (vel <= 0) return 0;
-                const variation = (Math.random() * 0.3 - 0.15) * loosenessFactor;
+                const r2 = seededRandom(stepNumber * 10 + instIdx);
+                const variation = (r2 * 0.3 - 0.15) * loosenessFactor;
                 return Math.max(0.01, Math.min(1.0, vel + vel * variation));
             };
 
-            if (p.kick && p.kick[stepNumber] > 0) offlineEngine.playKick(playTime, humanizeVelocity(p.kick[stepNumber]));
-            if (p.snare && p.snare[stepNumber] > 0) offlineEngine.playSnare(playTime, humanizeVelocity(p.snare[stepNumber]));
-            if (p.hihat && p.hihat[stepNumber] > 0) offlineEngine.playHihat(playTime, humanizeVelocity(p.hihat[stepNumber]), false);
-            if (p.openHat && p.openHat[stepNumber] > 0) offlineEngine.playHihat(playTime, humanizeVelocity(p.openHat[stepNumber]), true);
-            if (p.ghostSnare && p.ghostSnare[stepNumber] > 0) offlineEngine.playSnare(playTime, humanizeVelocity(p.ghostSnare[stepNumber]));
+            if (p.kick && p.kick[stepNumber] > 0) offlineEngine.playKick(playTime, humanizeVelocity(p.kick[stepNumber], 1));
+            if (p.snare && p.snare[stepNumber] > 0) offlineEngine.playSnare(playTime, humanizeVelocity(p.snare[stepNumber], 2));
+            if (p.hihat && p.hihat[stepNumber] > 0) offlineEngine.playHihat(playTime, humanizeVelocity(p.hihat[stepNumber], 3), false);
+            if (p.openHat && p.openHat[stepNumber] > 0) offlineEngine.playHihat(playTime, humanizeVelocity(p.openHat[stepNumber], 4), true);
+            if (p.ghostSnare && p.ghostSnare[stepNumber] > 0) offlineEngine.playSnare(playTime, humanizeVelocity(p.ghostSnare[stepNumber], 5));
             
             if (p.bass && p.bass[stepNumber] > 0 && p.bassNotes && p.bassNotes[stepNumber]) {
-               offlineEngine.playBass(noteToFreq(p.bassNotes[stepNumber]), playTime, humanizeVelocity(p.bass[stepNumber]));
+               offlineEngine.playBass(noteToFreq(p.bassNotes[stepNumber]), playTime, humanizeVelocity(p.bass[stepNumber], 6));
             }
             if (p.synth && p.synth[stepNumber] > 0 && p.synthNotes && p.synthNotes[stepNumber] && p.synthNotes[stepNumber].length > 0) {
                const freqs = p.synthNotes[stepNumber].map((n: string) => noteToFreq(n));
@@ -235,7 +290,8 @@ export default function App() {
             if (p.sampler && p.sampler[stepNumber] > 0 && p.samplerChops && engineRef.current?.userLoopBuffer) {
                offlineEngine.userLoopBuffer = engineRef.current.userLoopBuffer;
                offlineEngine.currentSlices = engineRef.current.currentSlices;
-               offlineEngine.playSlice(p.samplerChops[stepNumber], playTime, p.sampler[stepNumber]);
+               offlineEngine.padBank = engineRef.current.padBank;
+               offlineEngine.playPad(p.samplerChops[stepNumber], playTime, p.sampler[stepNumber]);
             }
         };
 
@@ -281,6 +337,7 @@ export default function App() {
   };
 
   const startPlayback = () => {
+    stopPlayback();
     const engine = ensureEngine();
     if (engine.ctx.state === 'suspended') {
       engine.ctx.resume();
@@ -293,7 +350,10 @@ export default function App() {
 
   const stopPlayback = () => {
     setIsPlaying(false);
-    if (timerIDRef.current) clearTimeout(timerIDRef.current);
+    if (timerIDRef.current !== null) {
+      clearTimeout(timerIDRef.current);
+      timerIDRef.current = null;
+    }
     setCurrentStep(0);
   };
 
@@ -419,11 +479,16 @@ export default function App() {
           </button>
           
           <button 
-            onClick={exportPattern}
+            onClick={exportProject}
             className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors text-sm px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-md border border-zinc-700 disabled:opacity-50"
           >
-            <Download className="w-4 h-4" /> Save Project (.json)
+            <Download className="w-4 h-4" /> Save Project
           </button>
+          
+          <label className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors text-sm px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-md border border-zinc-700 cursor-pointer">
+            <input type="file" accept=".json" className="hidden" onChange={importProject} />
+            Load Project
+          </label>
         </div>
       </header>
 
@@ -646,37 +711,8 @@ export default function App() {
               onSelectTrack={t => setSelectedTrack(prev => prev === t ? null : t)}
               onRightClickStep={(instrument, step, e) => {
                 e.preventDefault();
-                if (instrument === 'bass') {
-                    const current = pattern.bassNotes?.[step] || 'C2';
-                    const newNote = window.prompt('Enter Bass note:', current);
-                    if (newNote) {
-                        setPattern(prev => {
-                            const next: any = {...prev, bassNotes: [...(prev as any).bassNotes]};
-                            next.bassNotes[step] = newNote;
-                            return next;
-                        });
-                    }
-                } else if (instrument === 'synth') {
-                    const current = pattern.synthNotes?.[step]?.join(', ') || 'C3, E3, G3';
-                    const newNote = window.prompt('Enter Synth notes comma separated:', current);
-                    if (newNote) {
-                        const notes = newNote.split(',').map(s => s.trim());
-                        setPattern(prev => {
-                            const next: any = {...prev, synthNotes: [...(prev as any).synthNotes]};
-                            next.synthNotes[step] = notes;
-                            return next;
-                        });
-                    }
-                } else if (instrument === 'sampler') {
-                    const current = pattern.samplerChops?.[step] || 0;
-                    const newNote = window.prompt('Enter slice index (number):', String(current));
-                    if (newNote && !isNaN(parseInt(newNote))) {
-                        setPattern(prev => {
-                            const next: any = {...prev, samplerChops: [...(prev as any).samplerChops]};
-                            next.samplerChops[step] = parseInt(newNote);
-                            return next;
-                        });
-                    }
+                if (['bass', 'synth', 'sampler'].includes(instrument)) {
+                   setEditStep({ instrument, step, x: e.clientX, y: e.clientY });
                 }
               }}
             />
@@ -686,6 +722,92 @@ export default function App() {
               <span>{params.bars} Bar Loop</span>
             </div>
           </div>
+
+          {editStep && (
+            <div 
+               className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40"
+               onClick={() => setEditStep(null)}
+            >
+              <div 
+                 className="bg-zinc-900 border border-zinc-700 p-4 rounded-xl shadow-2xl w-64 animate-in fade-in zoom-in duration-200"
+                 onClick={e => e.stopPropagation()}
+              >
+                 <h3 className="text-amber-500 font-mono text-xs mb-4 uppercase">{editStep.instrument} • Step {editStep.step + 1}</h3>
+                 
+                 {editStep.instrument === 'bass' && (
+                    <div>
+                       <label className="text-zinc-400 text-xs mb-1 block">Bass Note</label>
+                       <input 
+                          autoFocus
+                          defaultValue={pattern.bassNotes?.[editStep.step] || 'C2'}
+                          onKeyDown={e => {
+                             if (e.key === 'Enter') {
+                                const val = e.currentTarget.value;
+                                setPattern(prev => {
+                                    const next: any = {...prev, bassNotes: [...(prev as any).bassNotes]};
+                                    next.bassNotes[editStep.step] = val;
+                                    return next;
+                                });
+                                setEditStep(null);
+                             } else if (e.key === 'Escape') setEditStep(null);
+                          }}
+                          className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-sm outline-none focus:border-amber-500"
+                       />
+                       <p className="text-[10px] text-zinc-500 mt-2">Press Enter to save, Esc to cancel.</p>
+                    </div>
+                 )}
+                 
+                 {editStep.instrument === 'synth' && (
+                    <div>
+                       <label className="text-zinc-400 text-xs mb-1 block">Synth Notes (CSV)</label>
+                       <input 
+                          autoFocus
+                          defaultValue={pattern.synthNotes?.[editStep.step]?.join(', ') || 'C3, E3, G3'}
+                          onKeyDown={e => {
+                             if (e.key === 'Enter') {
+                                const notes = e.currentTarget.value.split(',').map(s => s.trim()).filter(x => x);
+                                setPattern(prev => {
+                                    const next: any = {...prev, synthNotes: [...(prev as any).synthNotes]};
+                                    next.synthNotes[editStep.step] = notes;
+                                    return next;
+                                });
+                                setEditStep(null);
+                             } else if (e.key === 'Escape') setEditStep(null);
+                          }}
+                          className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-sm outline-none focus:border-amber-500"
+                       />
+                       <p className="text-[10px] text-zinc-500 mt-2">Press Enter to save, Esc to cancel.</p>
+                    </div>
+                 )}
+                 
+                 {editStep.instrument === 'sampler' && (
+                    <div>
+                       <label className="text-zinc-400 text-xs mb-1 block">Slice Index</label>
+                       <input 
+                          type="number"
+                          autoFocus
+                          defaultValue={pattern.samplerChops?.[editStep.step] ?? 0}
+                          onKeyDown={e => {
+                             if (e.key === 'Enter') {
+                                const val = parseInt(e.currentTarget.value);
+                                if (!isNaN(val)) {
+                                    setPattern(prev => {
+                                        const next: any = {...prev, samplerChops: [...(prev as any).samplerChops]};
+                                        next.samplerChops[editStep.step] = val;
+                                        return next;
+                                    });
+                                }
+                                setEditStep(null);
+                             } else if (e.key === 'Escape') setEditStep(null);
+                          }}
+                          className="w-full bg-zinc-800 border border-zinc-600 rounded px-2 py-1 text-sm outline-none focus:border-amber-500"
+                       />
+                       <p className="text-[10px] text-zinc-500 mt-2">Press Enter to save, Esc to cancel.</p>
+                    </div>
+                 )}
+              </div>
+            </div>
+          )}
 
           <SamplerUI engine={engineRef.current} />
         </div>
