@@ -7,7 +7,9 @@ import { Knob } from './components/Knob';
 
 import { Mixer } from './components/Mixer';
 import { SamplerUI } from './components/SamplerUI';
+import { SynthInspector } from './components/SynthInspector';
 import { noteToFreq } from './lib/audioUtils';
+import { encodeWAV } from './lib/wavUtils';
 
 const createEmptyTrack = () => Array(64).fill(0);
 const createEmptyStringTrack = () => Array(64).fill('');
@@ -67,7 +69,12 @@ export default function App() {
   const [breakName, setBreakName] = useState('The Funky Drummer');
   const [notes, setNotes] = useState('A classic tight funk groove. Keep the hi-hats crisp and the ghost notes subtle.');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isExportingWav, setIsExportingWav] = useState(false);
   const [errorDetails, setErrorDetails] = useState<string | null>(null);
+  const [previousPattern, setPreviousPattern] = useState<BreakPattern['pattern'] | null>(null);
+  const [lockedTracks, setLockedTracks] = useState<Set<string>>(new Set());
+  const [selectedTrack, setSelectedTrack] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   const engineRef = useRef<BreakmakerEngine | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -131,9 +138,13 @@ export default function App() {
        engineRef.current.playSlice(p.samplerChops[stepNumber], playTime, p.sampler[stepNumber]);
     }
 
+    const isCurrentlyPlaying = timerIDRef.current !== null;
     const timeToPlay = playTime - engineRef.current.ctx.currentTime;
     setTimeout(() => {
       setCurrentStep(stepNumber);
+      if (isCurrentlyPlaying) {
+        setCurrentBarView(Math.floor(stepNumber / 16) + 1);
+      }
     }, Math.max(0, timeToPlay * 1000));
   }, [swing, tempo, looseness]);
 
@@ -179,6 +190,79 @@ export default function App() {
     a.remove();
   };
 
+  const exportAudioWav = async () => {
+    setIsExportingWav(true);
+    try {
+        const totalSteps = params.bars * 16;
+        const totalTime = (totalSteps * (60 / tempo) / 4) + 1.5;
+        
+        const offlineCtx = new window.OfflineAudioContext(1, 44100 * totalTime, 44100);
+        const offlineEngine = new BreakmakerEngine(offlineCtx);
+        offlineEngine.setDirt(dirt);
+        offlineEngine.setHPF(hpf);
+        offlineEngine.setLPF(lpf);
+        offlineEngine.setKitProfile(params.kit);
+        
+        const scheduleNoteOffline = (stepNumber: number, time: number) => {
+            const loosenessFactor = looseness / 100;
+            let playTime = time + (Math.random() * 0.024 - 0.012) * loosenessFactor;
+            if (stepNumber % 2 !== 0) {
+              const swingAmount = (swing - 50) / 200; 
+              const stepDuration = (60 / tempo) / 4;
+              playTime += swingAmount * stepDuration;
+            }
+
+            const p = pattern;
+            const humanizeVelocity = (vel: number) => {
+                if (vel <= 0) return 0;
+                const variation = (Math.random() * 0.3 - 0.15) * loosenessFactor;
+                return Math.max(0.01, Math.min(1.0, vel + vel * variation));
+            };
+
+            if (p.kick && p.kick[stepNumber] > 0) offlineEngine.playKick(playTime, humanizeVelocity(p.kick[stepNumber]));
+            if (p.snare && p.snare[stepNumber] > 0) offlineEngine.playSnare(playTime, humanizeVelocity(p.snare[stepNumber]));
+            if (p.hihat && p.hihat[stepNumber] > 0) offlineEngine.playHihat(playTime, humanizeVelocity(p.hihat[stepNumber]), false);
+            if (p.openHat && p.openHat[stepNumber] > 0) offlineEngine.playHihat(playTime, humanizeVelocity(p.openHat[stepNumber]), true);
+            if (p.ghostSnare && p.ghostSnare[stepNumber] > 0) offlineEngine.playSnare(playTime, humanizeVelocity(p.ghostSnare[stepNumber]));
+            
+            if (p.bass && p.bass[stepNumber] > 0 && p.bassNotes && p.bassNotes[stepNumber]) {
+               offlineEngine.playBass(noteToFreq(p.bassNotes[stepNumber]), playTime, humanizeVelocity(p.bass[stepNumber]));
+            }
+            if (p.synth && p.synth[stepNumber] > 0 && p.synthNotes && p.synthNotes[stepNumber] && p.synthNotes[stepNumber].length > 0) {
+               const freqs = p.synthNotes[stepNumber].map((n: string) => noteToFreq(n));
+               offlineEngine.playSynth(freqs, playTime, p.synth[stepNumber], 'String Pad');
+            }
+            if (p.sampler && p.sampler[stepNumber] > 0 && p.samplerChops && engineRef.current?.userLoopBuffer) {
+               offlineEngine.userLoopBuffer = engineRef.current.userLoopBuffer;
+               offlineEngine.currentSlices = engineRef.current.currentSlices;
+               offlineEngine.playSlice(p.samplerChops[stepNumber], playTime, p.sampler[stepNumber]);
+            }
+        };
+
+        let nextNoteTime = 0.1;
+        for (let step = 0; step < totalSteps; step++) {
+            scheduleNoteOffline(step, nextNoteTime);
+            nextNoteTime += 0.25 * (60.0 / tempo);
+        }
+
+        const buffer = await offlineCtx.startRendering();
+        const wavBlob = encodeWAV(buffer.getChannelData(0), buffer.sampleRate);
+        const url = URL.createObjectURL(wavBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${breakName.replace(/\s+/g, '_').toLowerCase()}.wav`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    } catch(e) {
+        console.error(e);
+        setToast("WAV Export Failed");
+        setTimeout(() => setToast(null), 3000);
+    } finally {
+        setIsExportingWav(false);
+    }
+  };
+
   const handleFileUpload = async (instrument: string, event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -196,27 +280,35 @@ export default function App() {
     }
   };
 
-  const togglePlay = () => {
+  const startPlayback = () => {
     const engine = ensureEngine();
+    if (engine.ctx.state === 'suspended') {
+      engine.ctx.resume();
+    }
+    setIsPlaying(true);
+    currentStepRef.current = 0;
+    nextNoteTimeRef.current = engine.ctx.currentTime + 0.05;
+    scheduler();
+  };
 
+  const stopPlayback = () => {
+    setIsPlaying(false);
+    if (timerIDRef.current) clearTimeout(timerIDRef.current);
+    setCurrentStep(0);
+  };
+
+  const togglePlay = () => {
     if (isPlaying) {
-      setIsPlaying(false);
-      if (timerIDRef.current) clearTimeout(timerIDRef.current);
-      setCurrentStep(0);
+      stopPlayback();
     } else {
-      if (engine.ctx.state === 'suspended') {
-        engine.ctx.resume();
-      }
-      setIsPlaying(true);
-      currentStepRef.current = 0;
-      nextNoteTimeRef.current = engine.ctx.currentTime + 0.05;
-      scheduler();
+      startPlayback();
     }
   };
 
   const handleGenerate = async () => {
     setIsGenerating(true);
     setErrorDetails(null);
+    setPreviousPattern(pattern);
     try {
       const result = await generateBreakPattern(params);
       
@@ -239,19 +331,19 @@ export default function App() {
       };
 
       if (result.pattern) {
-        setPattern({
-          kick: padTrack(result.pattern.kick || []),
-          snare: padTrack(result.pattern.snare || []),
-          hihat: padTrack(result.pattern.hihat || []),
-          openHat: padTrack(result.pattern.openHat || []),
-          ghostSnare: padTrack(result.pattern.ghostSnare || []),
-          bass: padTrack(result.pattern.bass || []),
-          bassNotes: padStringTrack(result.pattern.bassNotes || []),
-          synth: padTrack(result.pattern.synth || []),
-          synthNotes: padArrayTrack(result.pattern.synthNotes || []),
-          sampler: padTrack(result.pattern.sampler || []),
-          samplerChops: padTrack(result.pattern.samplerChops || []),
-        });
+        setPattern(prev => ({
+          kick: lockedTracks.has('kick') ? prev.kick : padTrack(result.pattern?.kick || []),
+          snare: lockedTracks.has('snare') ? prev.snare : padTrack(result.pattern?.snare || []),
+          hihat: lockedTracks.has('hihat') ? prev.hihat : padTrack(result.pattern?.hihat || []),
+          openHat: lockedTracks.has('openHat') ? prev.openHat : padTrack(result.pattern?.openHat || []),
+          ghostSnare: lockedTracks.has('ghostSnare') ? prev.ghostSnare : padTrack(result.pattern?.ghostSnare || []),
+          bass: lockedTracks.has('bass') ? prev.bass : padTrack(result.pattern?.bass || []),
+          bassNotes: lockedTracks.has('bass') ? (prev as any).bassNotes : padStringTrack(result.pattern?.bassNotes || []),
+          synth: lockedTracks.has('synth') ? prev.synth : padTrack(result.pattern?.synth || []),
+          synthNotes: lockedTracks.has('synth') ? (prev as any).synthNotes : padArrayTrack(result.pattern?.synthNotes || []),
+          sampler: lockedTracks.has('sampler') ? prev.sampler : padTrack(result.pattern?.sampler || []),
+          samplerChops: lockedTracks.has('sampler') ? (prev as any).samplerChops : padTrack(result.pattern?.samplerChops || []),
+        }) as BreakPattern['pattern']);
       }
       if (result.tempo) setTempo(result.tempo);
       if (result.name) setBreakName(result.name);
@@ -268,6 +360,8 @@ export default function App() {
       } else {
         setDirt(20);
       }
+
+      startPlayback();
 
     } catch (error: any) {
       console.error("Failed to generate break:", error);
@@ -309,14 +403,28 @@ export default function App() {
           <span className="text-xs font-mono text-amber-500 border border-amber-500/30 px-2 py-0.5 rounded ml-2">v2.0</span>
         </div>
         
-        <button
-          onClick={handleGenerate}
-          disabled={isGenerating}
-          className="flex items-center gap-2 bg-amber-500 hover:bg-amber-400 text-zinc-900 px-4 py-2 rounded-md font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-          {isGenerating ? 'DESIGNING...' : 'GENERATE BREAK'}
-        </button>
+        {toast && (
+          <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-amber-500 text-zinc-900 px-4 py-2 rounded shadow-lg font-mono text-xs font-semibold animate-in slide-in-from-top-2">
+            {toast}
+          </div>
+        )}
+
+        <div className="flex items-center gap-2">
+          <button 
+            onClick={exportAudioWav}
+            disabled={isExportingWav}
+            className="flex items-center gap-2 text-zinc-300 hover:text-white transition-colors text-sm px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-md border border-zinc-700 disabled:opacity-50"
+          >
+            {isExportingWav ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />} Save WAV
+          </button>
+          
+          <button 
+            onClick={exportPattern}
+            className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors text-sm px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-md border border-zinc-700 disabled:opacity-50"
+          >
+            <Download className="w-4 h-4" /> Save Project (.json)
+          </button>
+        </div>
       </header>
 
       <main className="max-w-6xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -405,6 +513,10 @@ export default function App() {
                   onChange={e => {
                     const newDrummer = e.target.value;
                     const profile = DRUMMER_PROFILES.find(p => p.name === newDrummer);
+                    if (profile && (profile.kit !== params.kit || profile.feel !== params.feel)) {
+                        setToast(`Kit and Feel updated for ${newDrummer}`);
+                        setTimeout(() => setToast(null), 3000);
+                    }
                     setParams(prev => ({
                         ...prev, 
                         drummer: newDrummer,
@@ -438,9 +550,22 @@ export default function App() {
               {isGenerating ? 'DESIGNING GROOVE...' : 'GENERATE GROOVE'}
             </button>
             
+            {previousPattern && (
+              <button 
+                onClick={() => {
+                  const current = pattern;
+                  setPattern(previousPattern);
+                  setPreviousPattern(current);
+                }}
+                className="mt-2 w-full flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-4 py-2 rounded-md font-medium transition-all text-sm border border-zinc-700"
+              >
+                Revert to Last Pattern
+              </button>
+            )}
+            
             {errorDetails && (
               <div className="mt-4 p-3 bg-red-500/10 border border-red-500/20 rounded text-red-400 text-xs text-center">
-                {errorDetails}
+                AI generation is unavailable right now. Your current pattern is untouched.
               </div>
             )}
           </div>
@@ -473,23 +598,17 @@ export default function App() {
                 </button>
                 
                 <div>
-                  <h2 className="text-xl font-bold text-zinc-100">{breakName}</h2>
-                  <div className="text-xs font-mono text-zinc-500 flex gap-3 mt-1">
+                  <input
+                    value={breakName}
+                    onChange={(e) => setBreakName(e.target.value)}
+                    className="text-xl font-bold text-zinc-100 bg-transparent border-none outline-none hover:bg-zinc-800 rounded px-1 -ml-1 transition-colors w-full"
+                  />
+                  <div className="text-xs font-mono text-zinc-500 flex gap-3 mt-1 px-1">
                     <span>{tempo} BPM</span>
                     <span>•</span>
                     <span>{params.bars * 16} STEPS</span>
                   </div>
                 </div>
-              </div>
-
-              <div className="flex items-center gap-2 border border-zinc-700/50 p-1 rounded-md bg-zinc-900/50">
-                <button 
-                  onClick={exportPattern}
-                  className="px-3 py-1.5 flex items-center gap-2 hover:bg-zinc-800 rounded text-xs font-medium text-zinc-300 transition-colors"
-                  title="Export Version"
-                >
-                  <Download className="w-3.5 h-3.5" /> Export Preset
-                </button>
               </div>
             </div>
 
@@ -514,6 +633,52 @@ export default function App() {
               currentStep={currentStep} 
               currentBarView={currentBarView}
               onToggleStep={toggleStep} 
+              lockedTracks={lockedTracks}
+              onToggleLock={inst => {
+                setLockedTracks(prev => {
+                  const n = new Set(prev);
+                  if (n.has(inst)) n.delete(inst);
+                  else n.add(inst);
+                  return n;
+                });
+              }}
+              selectedTrack={selectedTrack || undefined}
+              onSelectTrack={t => setSelectedTrack(prev => prev === t ? null : t)}
+              onRightClickStep={(instrument, step, e) => {
+                e.preventDefault();
+                if (instrument === 'bass') {
+                    const current = pattern.bassNotes?.[step] || 'C2';
+                    const newNote = window.prompt('Enter Bass note:', current);
+                    if (newNote) {
+                        setPattern(prev => {
+                            const next: any = {...prev, bassNotes: [...(prev as any).bassNotes]};
+                            next.bassNotes[step] = newNote;
+                            return next;
+                        });
+                    }
+                } else if (instrument === 'synth') {
+                    const current = pattern.synthNotes?.[step]?.join(', ') || 'C3, E3, G3';
+                    const newNote = window.prompt('Enter Synth notes comma separated:', current);
+                    if (newNote) {
+                        const notes = newNote.split(',').map(s => s.trim());
+                        setPattern(prev => {
+                            const next: any = {...prev, synthNotes: [...(prev as any).synthNotes]};
+                            next.synthNotes[step] = notes;
+                            return next;
+                        });
+                    }
+                } else if (instrument === 'sampler') {
+                    const current = pattern.samplerChops?.[step] || 0;
+                    const newNote = window.prompt('Enter slice index (number):', String(current));
+                    if (newNote && !isNaN(parseInt(newNote))) {
+                        setPattern(prev => {
+                            const next: any = {...prev, samplerChops: [...(prev as any).samplerChops]};
+                            next.samplerChops[step] = parseInt(newNote);
+                            return next;
+                        });
+                    }
+                }
+              }}
             />
             
             <div className="mt-4 flex justify-between text-[10px] text-zinc-500 font-mono uppercase">
@@ -529,80 +694,86 @@ export default function App() {
         <div className="lg:col-span-3 space-y-4">
 
           <Mixer engine={engineRef.current} />
-          
-          {/* Groove Profile */}
-          <div className="bg-[#1a1a1a] rounded-xl border border-zinc-800 p-5">
-            <h2 className="text-xs font-mono text-amber-500/80 uppercase tracking-widest mb-4 flex items-center gap-2">
-              <span className="bg-amber-500/20 text-amber-500 px-1.5 py-0.5 rounded text-[10px]">2</span>
-              Groove & Timing
-            </h2>
-            
-            <div className="mb-6 space-y-4">
-              <div>
-                <label className="block text-xs text-zinc-400 mb-1 flex justify-between">
-                  <span>Feel / Base Syncopation</span>
-                  <span className="text-zinc-600 font-mono">Profile</span>
-                </label>
-                <select 
-                  value={params.feel}
-                  onChange={e => setParams({...params, feel: e.target.value})}
-                  className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-sm focus:border-amber-500 outline-none"
-                >
-                  {FEELS.map(e => <option key={e}>{e}</option>)}
-                </select>
-              </div>
-            </div>
 
-            <div className="grid grid-cols-2 gap-y-8">
-              <Knob label="Tempo" value={tempo} onChange={setTempo} min={60} max={140} />
-              <Knob label="Swing" value={swing} onChange={setSwing} min={50} max={75} />
-              <Knob label="Looseness" value={looseness} onChange={setLooseness} min={0} max={100} />
-            </div>
-          </div>
+          {(selectedTrack === 'synth' || selectedTrack === 'bass') ? (
+            <SynthInspector track={selectedTrack as 'synth'|'bass'} engine={engineRef.current} />
+          ) : (
+             <>
+                {/* Groove Profile */}
+                <div className="bg-[#1a1a1a] rounded-xl border border-zinc-800 p-5">
+                  <h2 className="text-xs font-mono text-amber-500/80 uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <span className="bg-amber-500/20 text-amber-500 px-1.5 py-0.5 rounded text-[10px]">2</span>
+                    Groove & Timing
+                  </h2>
+                  
+                  <div className="mb-6 space-y-4">
+                    <div>
+                      <label className="block text-xs text-zinc-400 mb-1 flex justify-between">
+                        <span>Feel / Base Syncopation</span>
+                        <span className="text-zinc-600 font-mono">Profile</span>
+                      </label>
+                      <select 
+                        value={params.feel}
+                        onChange={e => setParams({...params, feel: e.target.value})}
+                        className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-sm focus:border-amber-500 outline-none"
+                      >
+                        {FEELS.map(e => <option key={e}>{e}</option>)}
+                      </select>
+                    </div>
+                  </div>
 
-          {/* Sound Profile */}
-          <div className="bg-[#1a1a1a] rounded-xl border border-zinc-800 p-5 mt-4">
-            <h2 className="text-xs font-mono text-amber-500/80 uppercase tracking-widest mb-4 flex items-center gap-2">
-              <span className="bg-amber-500/20 text-amber-500 px-1.5 py-0.5 rounded text-[10px]">3</span>
-              Texture & Mix
-            </h2>
-            
-            <div className="mb-6 space-y-4">
-              <div>
-                <label className="block text-xs text-zinc-400 mb-1 flex justify-between">
-                   <span>Kit Router</span>
-                   <span className="text-zinc-600 font-mono">Routing</span>
-                </label>
-                <select 
-                  value={params.kit}
-                  onChange={e => setParams({...params, kit: e.target.value})}
-                  className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-sm focus:border-amber-500 outline-none"
-                >
-                  {KITS.map(e => <option key={e}>{e}</option>)}
-                </select>
-              </div>
-
-              {params.kit === 'Custom Upload' && (
-                <div className="bg-zinc-900/50 p-3 rounded-lg border border-zinc-800/80 animate-in fade-in zoom-in duration-200">
-                  <h3 className="text-[10px] font-mono text-zinc-500 uppercase mb-2">User Stems</h3>
-                  <div className="space-y-2">
-                     {['kick', 'snare', 'hihat', 'openHat', 'ghostSnare'].map((inst) => (
-                       <div key={inst} className="flex justify-between items-center bg-zinc-950 border border-zinc-800/50 p-1.5 rounded">
-                          <span className="text-[10px] text-zinc-400 font-mono w-16">{inst}</span>
-                          <input type="file" accept="audio/*" className="text-[9px] text-zinc-500 w-full ml-1 file:mr-2 file:py-0.5 file:px-1.5 file:rounded file:border-0 file:text-[9px] file:bg-zinc-800 file:text-zinc-300 hover:file:bg-zinc-700 cursor-pointer" onChange={(e) => handleFileUpload(inst, e)} />
-                       </div>
-                     ))}
+                  <div className="grid grid-cols-2 gap-y-8">
+                    <Knob label="Tempo" value={tempo} onChange={setTempo} min={60} max={140} />
+                    <Knob label="Swing" value={swing} onChange={setSwing} min={50} max={75} />
+                    <Knob label="Looseness" value={looseness} onChange={setLooseness} min={0} max={100} />
                   </div>
                 </div>
-              )}
-            </div>
 
-            <div className="grid grid-cols-2 gap-y-8">
-              <Knob label="Tape / Dirt" value={dirt} onChange={setDirt} min={0} max={100} />
-              <Knob label="HPF" value={hpf} onChange={setHpf} min={20} max={2000} formatValue={v => v >= 1000 ? `${(v/1000).toFixed(1)}k` : `${v}Hz`} />
-              <Knob label="LPF" value={lpf} onChange={setLpf} min={500} max={20000} formatValue={v => v >= 1000 ? `${(v/1000).toFixed(1)}k` : `${v}Hz`} />
-            </div>
-          </div>
+                {/* Sound Profile */}
+                <div className="bg-[#1a1a1a] rounded-xl border border-zinc-800 p-5 mt-4">
+                  <h2 className="text-xs font-mono text-amber-500/80 uppercase tracking-widest mb-4 flex items-center gap-2">
+                    <span className="bg-amber-500/20 text-amber-500 px-1.5 py-0.5 rounded text-[10px]">3</span>
+                    Texture & Mix
+                  </h2>
+                  
+                  <div className="mb-6 space-y-4">
+                    <div>
+                      <label className="block text-xs text-zinc-400 mb-1 flex justify-between">
+                        <span>Kit Router</span>
+                        <span className="text-zinc-600 font-mono">Routing</span>
+                      </label>
+                      <select 
+                        value={params.kit}
+                        onChange={e => setParams({...params, kit: e.target.value})}
+                        className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-sm focus:border-amber-500 outline-none"
+                      >
+                        {KITS.map(e => <option key={e}>{e}</option>)}
+                      </select>
+                    </div>
+
+                    {params.kit === 'Custom Upload' && (
+                      <div className="bg-zinc-900/50 p-3 rounded-lg border border-zinc-800/80 animate-in fade-in zoom-in duration-200">
+                        <h3 className="text-[10px] font-mono text-zinc-500 uppercase mb-2">User Stems</h3>
+                        <div className="space-y-2">
+                          {['kick', 'snare', 'hihat', 'openHat', 'ghostSnare'].map((inst) => (
+                            <div key={inst} className="flex justify-between items-center bg-zinc-950 border border-zinc-800/50 p-1.5 rounded">
+                                <span className="text-[10px] text-zinc-400 font-mono w-16">{inst}</span>
+                                <input type="file" accept="audio/*" className="text-[9px] text-zinc-500 w-full ml-1 file:mr-2 file:py-0.5 file:px-1.5 file:rounded file:border-0 file:text-[9px] file:bg-zinc-800 file:text-zinc-300 hover:file:bg-zinc-700 cursor-pointer" onChange={(e) => handleFileUpload(inst, e)} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-y-8">
+                    <Knob label="Tape / Dirt" value={dirt} onChange={setDirt} min={0} max={100} />
+                    <Knob label="HPF" value={hpf} onChange={setHpf} min={20} max={2000} formatValue={v => v >= 1000 ? `${(v/1000).toFixed(1)}k` : `${v}Hz`} />
+                    <Knob label="LPF" value={lpf} onChange={setLpf} min={500} max={20000} formatValue={v => v >= 1000 ? `${(v/1000).toFixed(1)}k` : `${v}Hz`} />
+                  </div>
+                </div>
+             </>
+          )}
         </div>
 
       </main>

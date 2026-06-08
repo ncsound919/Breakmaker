@@ -1,5 +1,15 @@
+export interface SynthPatch {
+  type: string;
+  filterCutoff: number;
+  filterRes: number;
+  attack: number;
+  decay: number;
+  sustain: number;
+  release: number;
+}
+
 export class BreakmakerEngine {
-  ctx: AudioContext;
+  ctx: AudioContext | OfflineAudioContext;
   masterGain: GainNode;
   compressor: DynamicsCompressorNode;
   distortion: WaveShaperNode;
@@ -20,9 +30,30 @@ export class BreakmakerEngine {
   };
   userLoopBuffer: AudioBuffer | null = null;
   currentSlices: number[] = [];
+
+  synthPatch: SynthPatch = {
+    type: 'sawtooth',
+    filterCutoff: 1500,
+    filterRes: 1,
+    attack: 0.1,
+    decay: 0.3,
+    sustain: 0.5,
+    release: 0.8
+  };
+
+  bassPatch: SynthPatch = {
+    type: 'triangle',
+    filterCutoff: 800,
+    filterRes: 2,
+    attack: 0.05,
+    decay: 0.4,
+    sustain: 0.2,
+    release: 0.4
+  };
+
   
-  constructor() {
-    this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  constructor(context?: AudioContext | OfflineAudioContext) {
+    this.ctx = context || new (window.AudioContext || (window as any).webkitAudioContext)();
     
     this.masterGain = this.ctx.createGain();
     this.masterGain.gain.value = 0.8; // Headroom
@@ -360,29 +391,37 @@ export class BreakmakerEngine {
     const gain = this.ctx.createGain();
     const filter = this.ctx.createBiquadFilter();
 
-    osc.type = 'triangle';
+    osc.type = this.bassPatch.type as OscillatorType;
     osc.frequency.value = noteFreq;
 
     filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(1200, time);
-    filter.frequency.exponentialRampToValueAtTime(150, time + 0.3);
+    filter.Q.value = this.bassPatch.filterRes;
+    filter.frequency.setValueAtTime(this.bassPatch.filterCutoff * 2, time);
+    filter.frequency.exponentialRampToValueAtTime(this.bassPatch.filterCutoff, time + this.bassPatch.decay);
 
     osc.connect(filter);
     filter.connect(gain);
     gain.connect(this.bassBus);
 
-    gain.gain.setValueAtTime(velocity * 0.9, time);
-    gain.gain.exponentialRampToValueAtTime(0.01, time + 0.6);
+    const atkTime = time + Math.max(0.005, this.bassPatch.attack);
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(velocity, atkTime);
+    
+    // Decay to sustain
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.01, velocity * this.bassPatch.sustain), atkTime + this.bassPatch.decay);
+
+    // Release
+    const releaseTime = atkTime + this.bassPatch.decay + this.bassPatch.release;
+    gain.gain.setValueAtTime(Math.max(0.01, velocity * this.bassPatch.sustain), releaseTime - this.bassPatch.release);
+    gain.gain.linearRampToValueAtTime(0, releaseTime);
 
     osc.start(time);
-    osc.stop(time + 0.6);
+    osc.stop(releaseTime);
   }
 
-  playSynth(freqs: number[], time: number, velocity: number, synthType: string = 'Stab') {
+  playSynth(freqs: number[], time: number, velocity: number, synthType?: string) {
     if (velocity <= 0 || !freqs.length) return;
     
-    const isPad = synthType.toLowerCase().includes('pad');
-
     freqs.forEach(freq => {
         if (freq <= 0) return;
         const osc = this.ctx.createOscillator();
@@ -393,33 +432,28 @@ export class BreakmakerEngine {
         filter.connect(gain);
         gain.connect(this.synthBus);
 
-        if (isPad) {
-            osc.type = 'sawtooth';
-            osc.frequency.value = freq;
-            filter.type = 'lowpass';
-            filter.frequency.setValueAtTime(400, time);
-            filter.frequency.linearRampToValueAtTime(1200, time + 0.4);
+        osc.type = this.synthPatch.type as OscillatorType;
+        osc.frequency.value = freq;
+        filter.type = 'lowpass';
+        filter.Q.value = this.synthPatch.filterRes;
+        
+        // Envelope applied to filter
+        filter.frequency.setValueAtTime(this.synthPatch.filterCutoff / 2, time);
+        filter.frequency.linearRampToValueAtTime(this.synthPatch.filterCutoff, time + this.synthPatch.attack);
+        filter.frequency.exponentialRampToValueAtTime(this.synthPatch.filterCutoff * 0.5, time + this.synthPatch.attack + this.synthPatch.decay);
 
-            gain.gain.setValueAtTime(0, time);
-            gain.gain.linearRampToValueAtTime(velocity * 0.25, time + 0.4);
-            gain.gain.linearRampToValueAtTime(0, time + 1.2);
-            
-            osc.start(time);
-            osc.stop(time + 1.2);
-        } else {
-            // Stab / Keys
-            osc.type = 'square';
-            osc.frequency.value = freq;
-            filter.type = 'lowpass';
-            filter.frequency.setValueAtTime(3000, time);
-            filter.frequency.exponentialRampToValueAtTime(300, time + 0.2);
-            
-            gain.gain.setValueAtTime(velocity * 0.2, time);
-            gain.gain.exponentialRampToValueAtTime(0.01, time + 0.4);
-            
-            osc.start(time);
-            osc.stop(time + 0.4);
-        }
+        // Amplitude Envelope
+        const atkTime = time + Math.max(0.005, this.synthPatch.attack);
+        gain.gain.setValueAtTime(0, time);
+        gain.gain.linearRampToValueAtTime(velocity * 0.5, atkTime);
+        gain.gain.exponentialRampToValueAtTime(Math.max(0.001, velocity * 0.5 * this.synthPatch.sustain), atkTime + this.synthPatch.decay);
+        
+        const releaseTime = atkTime + this.synthPatch.decay + this.synthPatch.release;
+        gain.gain.setValueAtTime(Math.max(0.001, velocity * 0.5 * this.synthPatch.sustain), releaseTime - this.synthPatch.release);
+        gain.gain.linearRampToValueAtTime(0, releaseTime);
+        
+        osc.start(time);
+        osc.stop(releaseTime);
     });
   }
 }
